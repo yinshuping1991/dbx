@@ -647,6 +647,13 @@ pub fn escape_value_typed(val: &serde_json::Value, db_type: &DatabaseType, colum
                     }
                 }
             }
+            DatabaseType::SqlServer => {
+                if *b {
+                    "1".to_string()
+                } else {
+                    "0".to_string()
+                }
+            }
             _ => {
                 if *b {
                     "TRUE".to_string()
@@ -4238,6 +4245,37 @@ mod tests {
         );
 
         assert_eq!(sql, "INSERT INTO [dbo].[customers] ([name], [note]) VALUES\n(N'Tiếng Việt', N'O''Brien')");
+    }
+
+    #[test]
+    fn sqlserver_insert_formats_bit_booleans_as_numeric_literals() {
+        let sql = generate_insert_typed(
+            &[String::from("enabled"), String::from("deleted")],
+            &[Some(String::from("bit")), Some(String::from("BIT"))],
+            &[vec![json!(true), json!(false)]],
+            "flags",
+            "dbo",
+            &DatabaseType::SqlServer,
+        );
+
+        assert_eq!(sql, "INSERT INTO [dbo].[flags] ([enabled], [deleted]) VALUES\n(1, 0)");
+    }
+
+    #[test]
+    fn sqlserver_upsert_formats_bit_booleans_as_numeric_literals() {
+        let sql = generate_upsert_typed(
+            &[String::from("id"), String::from("enabled")],
+            &[Some(String::from("int")), Some(String::from("bit"))],
+            &[vec![json!(1), json!(true)]],
+            "flags",
+            "dbo",
+            &DatabaseType::SqlServer,
+            &[String::from("id")],
+        );
+
+        assert!(sql.contains("USING (VALUES\n(1, 1)\n)"));
+        assert!(!sql.contains("TRUE"));
+        assert!(!sql.contains("FALSE"));
     }
 
     #[test]
