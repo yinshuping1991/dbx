@@ -71,12 +71,7 @@ const simpleObjectParentTypes = new Set<TreeNodeType>(["database", "schema", "li
 const simpleObjectChildTypes = new Set<TreeNodeType>(["table", "view", "materialized_view", "procedure", "function", "sequence", "package", "package-body", "load-more"]);
 
 function isSimpleObjectSearchParent(node: TreeNode): boolean {
-  return (
-    settingsStore.editorSettings.sidebarObjectDisplay === "simple" &&
-    simpleObjectParentTypes.has(node.type) &&
-    node.isExpanded === true &&
-    !!node.children?.some((child) => simpleObjectChildTypes.has(child.type))
-  );
+  return settingsStore.editorSettings.sidebarObjectDisplay === "simple" && simpleObjectParentTypes.has(node.type) && node.isExpanded === true && !!node.children?.some((child) => simpleObjectChildTypes.has(child.type));
 }
 
 function collectExpandedObjectSearchTargets(node: TreeNode, tasks: Promise<void>[], refreshedNodeIds?: Set<string>) {
@@ -438,7 +433,7 @@ async function ensureTreeLoadedForTarget(target: ActiveTabSidebarTarget, opts?: 
         await store.loadMongoDatabases(connId);
       } else if (config.db_type === "elasticsearch") {
         await store.loadElasticsearchIndices(connId);
-      } else if (config.db_type === "qdrant" || config.db_type === "milvus" || config.db_type === "weaviate") {
+      } else if (config.db_type === "qdrant" || config.db_type === "milvus" || config.db_type === "weaviate" || config.db_type === "chromadb") {
         await store.loadVectorCollections(connId);
       } else if (config.db_type === "mq") {
         await store.loadMqTenants(connId, loadOptions);

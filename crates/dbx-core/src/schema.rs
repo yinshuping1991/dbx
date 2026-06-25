@@ -1057,7 +1057,7 @@ async fn list_tables_once(
             .map(|tables| filter_table_infos(tables, filter, limit, offset, object_types)),
         PoolKind::VectorDb(client) => db::vector_driver::list_collections(client)
             .await
-            .map(|names| collection_names_to_tables(names, "COLLECTION"))
+            .map(|infos| collection_names_to_tables(infos.into_iter().map(|i| i.name).collect(), "COLLECTION"))
             .map(|tables| filter_table_infos(tables, filter, limit, offset, object_types)),
         _ => Ok(vec![]),
     }

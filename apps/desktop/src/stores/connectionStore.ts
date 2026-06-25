@@ -410,6 +410,7 @@ export const useConnectionStore = defineStore("connection", () => {
       qdrant: "Qdrant",
       milvus: "Milvus",
       weaviate: "Weaviate",
+      chromadb: "ChromaDB",
       doris: "Doris",
       starrocks: "StarRocks",
       manticoresearch: "Manticore Search",
@@ -1061,7 +1062,7 @@ export const useConnectionStore = defineStore("connection", () => {
       await loadMongoDatabases(connectionId);
     } else if (config.db_type === "elasticsearch") {
       await loadElasticsearchIndices(connectionId);
-    } else if (config.db_type === "qdrant" || config.db_type === "milvus" || config.db_type === "weaviate") {
+    } else if (config.db_type === "qdrant" || config.db_type === "milvus" || config.db_type === "weaviate" || config.db_type === "chromadb") {
       await loadVectorCollections(connectionId);
     } else if (config.db_type === "mq") {
       await loadMqTenants(connectionId, { force: true });
@@ -1596,17 +1597,19 @@ export const useConnectionStore = defineStore("connection", () => {
     try {
       await ensureConnected(connectionId);
       const collections = await withMetadataLoadTimeout(connectionId, api.vectorListCollections(connectionId), "vector collections");
+      const sorted = [...collections].sort((a, b) => a.name.localeCompare(b.name));
       setChildren(
         node,
         withSavedSqlRoot(
           connectionId,
-          sortSidebarNames(collections).map((collection) => ({
-            id: `${connectionId}:__vector_collection:${collection}`,
-            label: collection,
+          sorted.map((info) => ({
+            id: `${connectionId}:__vector_collection:${info.id}`,
+            label: info.name,
             type: "vector-collection" as const,
             connectionId,
             database: "default",
             isExpanded: false,
+            meta: info.dimension != null ? { dimension: info.dimension } : undefined,
           })),
           node,
         ),
@@ -1628,9 +1631,10 @@ export const useConnectionStore = defineStore("connection", () => {
     node.isLoading = true;
     try {
       const collections = await api.mongoListCollections(connectionId, database);
+      const names = collections.map((c) => c.name);
       setChildren(
         node,
-        sortSidebarNames(collections).map((col) => ({
+        sortSidebarNames(names).map((col) => ({
           id: `${nodeId}:${col}`,
           label: col,
           type: "mongo-collection" as const,
@@ -2291,7 +2295,7 @@ export const useConnectionStore = defineStore("connection", () => {
         await loadMongoDatabases(node.connectionId);
       } else if (config?.db_type === "elasticsearch") {
         await loadElasticsearchIndices(node.connectionId);
-      } else if (config?.db_type === "qdrant" || config?.db_type === "milvus" || config?.db_type === "weaviate") {
+      } else if (config?.db_type === "qdrant" || config?.db_type === "milvus" || config?.db_type === "weaviate" || config?.db_type === "chromadb") {
         await loadVectorCollections(node.connectionId);
       } else if (config?.db_type === "mq") {
         await loadMqTenants(node.connectionId, options);
@@ -2779,7 +2783,7 @@ export const useConnectionStore = defineStore("connection", () => {
     if (cached) return cached;
     return withCompletionInFlight(`${cacheKey}:mongo-collections`, async () => {
       await ensureConnected(connectionId);
-      const collections = sortSidebarNames(await api.mongoListCollections(connectionId, database));
+      const collections = sortSidebarNames((await api.mongoListCollections(connectionId, database)).map((c) => c.name));
       mongoCompletionCollectionsCache.value[cacheKey] = collections;
       evictOldestCacheEntries(mongoCompletionCollectionsCache.value, COMPLETION_CACHE_MAX);
       return collections;
