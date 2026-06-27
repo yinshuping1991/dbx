@@ -316,11 +316,13 @@ export const useSavedSqlStore = defineStore("savedSql", () => {
       return parts.join("/");
     };
     const loadedFiles = await Promise.all(sortFilesByOrder(files.value).map((file) => ensureFileContent(file.id)));
-    return loadedFiles.filter((file): file is SavedSqlFile => Boolean(file)).map((file) => ({
-      folderName: folderPath(file.folderId),
-      fileName: file.name,
-      sql: file.sql,
-    }));
+    return loadedFiles
+      .filter((file): file is SavedSqlFile => Boolean(file))
+      .map((file) => ({
+        folderName: folderPath(file.folderId),
+        fileName: file.name,
+        sql: file.sql,
+      }));
   }
 
   async function syncToLocalDirectory() {
