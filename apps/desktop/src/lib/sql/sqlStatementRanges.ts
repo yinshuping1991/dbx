@@ -104,6 +104,10 @@ const ALTER_BODY_KEYWORDS = new Set(["ADD", "ALTER", "COMMENT", "DROP", "MODIFY"
 const SET_OPERATION_KEYWORDS = new Set(["UNION", "INTERSECT", "EXCEPT", "MINUS"]);
 const SET_OPERATION_MODIFIER_KEYWORDS = new Set(["ALL", "DISTINCT"]);
 const ORACLE_LIKE_PL_SQL_DATABASES: ReadonlySet<DatabaseType> = new Set(["oracle", "dameng", "gaussdb", "yashandb", "oscar", "oceanbase-oracle"]);
+const MYSQL_ROUTINE_BLOCK_DATABASES: ReadonlySet<DatabaseType> = new Set(["mysql", "doris", "starrocks", "manticoresearch", "goldendb"]);
+const MYSQL_ROUTINE_OBJECT_TYPES = new Set(["PROCEDURE", "FUNCTION", "TRIGGER", "EVENT"]);
+const MYSQL_NON_ROUTINE_CREATE_TYPES = new Set(["DATABASE", "INDEX", "LOGFILE", "ROLE", "SCHEMA", "SERVER", "SPATIAL", "TABLE", "TEMPORARY", "UNIQUE", "USER", "VIEW"]);
+const MYSQL_CONTROL_BLOCK_SUFFIXES = new Set(["IF", "LOOP", "CASE", "REPEAT", "WHILE"]);
 const ORACLE_PL_SQL_BLOCK_STARTERS = new Set(["DECLARE", "BEGIN"]);
 const ORACLE_PL_SQL_CREATE_OBJECT_TYPES = new Set(["FUNCTION", "PROCEDURE", "TRIGGER", "PACKAGE", "PACKAGE BODY", "TYPE", "TYPE BODY"]);
 const ORACLE_PL_SQL_TERMINATORS = new Set(["IF", "LOOP", "CASE"]);
@@ -311,16 +315,28 @@ export function splitSqlStatementRanges(sql: string, databaseType?: DatabaseType
         continue;
       }
     } else if (ch === ";") {
-      const isOraclePlSql = isOracleLikeDatabase(databaseType) && statementStart !== -1 && startsWithOraclePlSqlBlock(sql.slice(statementStart, i));
-      if (isOraclePlSql) {
-        markContent(i);
-        if (!oraclePlSqlBlockIsComplete(sql.slice(statementStart, i + 1))) {
+      const isMysqlRoutineBlock = isMysqlRoutineBlockDatabase(databaseType) && statementStart !== -1 && startsWithMysqlRoutineBlock(sql.slice(statementStart, i));
+      if (isMysqlRoutineBlock) {
+        if (!mysqlRoutineBlockIsComplete(sql.slice(statementStart, i + 1))) {
+          markContent(i);
           i += 1;
           continue;
         }
-        flush(i + 1);
-      } else {
+        // The final semicolon is the client-side statement delimiter.
+        // Internal semicolons remain part of the routine body.
         flush();
+      } else {
+        const isOraclePlSql = isOracleLikeDatabase(databaseType) && statementStart !== -1 && startsWithOraclePlSqlBlock(sql.slice(statementStart, i));
+        if (isOraclePlSql) {
+          markContent(i);
+          if (!oraclePlSqlBlockIsComplete(sql.slice(statementStart, i + 1))) {
+            i += 1;
+            continue;
+          }
+          flush(i + 1);
+        } else {
+          flush();
+        }
       }
       statementHitStart = i + 1;
       i += 1;
@@ -1036,6 +1052,163 @@ export function isOracleLikeDatabase(databaseType?: DatabaseType): boolean {
 
 export function isOraclePlSqlStatement(sql: string, databaseType?: DatabaseType): boolean {
   return isOracleLikeDatabase(databaseType) && startsWithOraclePlSqlBlock(sql);
+}
+
+function isMysqlRoutineBlockDatabase(databaseType?: DatabaseType): boolean {
+  return !!databaseType && MYSQL_ROUTINE_BLOCK_DATABASES.has(databaseType);
+}
+
+function startsWithMysqlRoutineBlock(sql: string): boolean {
+  return isMysqlRoutineDdlStart(sql) && mysqlRoutineTokens(sql).some((token) => token.kind === "word" && token.value === "BEGIN");
+}
+
+function isMysqlRoutineDdlStart(sql: string): boolean {
+  const words = mysqlRoutineWords(sql).slice(0, 16);
+  if (words[0] !== "CREATE") return false;
+
+  for (const word of words.slice(1)) {
+    if (MYSQL_ROUTINE_OBJECT_TYPES.has(word)) return true;
+    if (MYSQL_NON_ROUTINE_CREATE_TYPES.has(word)) return false;
+  }
+  return false;
+}
+
+function mysqlRoutineBlockIsComplete(sql: string): boolean {
+  if (!startsWithMysqlRoutineBlock(sql)) return false;
+
+  const tokens = mysqlRoutineTokens(sql);
+  let beginDepth = 0;
+  let sawBegin = false;
+
+  for (let index = 0; index < tokens.length; index += 1) {
+    const token = tokens[index];
+    if (token.kind !== "word") continue;
+    if (token.value === "BEGIN") {
+      if (previousWordToken(tokens, index) === "END") continue;
+      sawBegin = true;
+      beginDepth += 1;
+      continue;
+    }
+    if (token.value === "END" && sawBegin) {
+      if (MYSQL_CONTROL_BLOCK_SUFFIXES.has(nextWordToken(tokens, index) ?? "")) continue;
+      beginDepth = Math.max(0, beginDepth - 1);
+    }
+  }
+
+  return sawBegin && beginDepth === 0 && tokens[tokens.length - 1]?.kind === "semicolon";
+}
+
+function mysqlRoutineWords(sql: string): string[] {
+  return mysqlRoutineTokens(sql)
+    .filter((token): token is { kind: "word"; value: string } => token.kind === "word")
+    .map((token) => token.value);
+}
+
+function mysqlRoutineTokens(sql: string): Array<{ kind: "word" | "semicolon"; value: string }> {
+  const tokens: Array<{ kind: "word" | "semicolon"; value: string }> = [];
+  let state: QuoteState | "lineComment" | "blockComment" = "none";
+  let i = 0;
+
+  while (i < sql.length) {
+    const ch = sql[i];
+    const next = sql[i + 1] ?? "";
+
+    if (state === "lineComment") {
+      if (ch === "\n") state = "none";
+      i += 1;
+      continue;
+    }
+    if (state === "blockComment") {
+      if (ch === "*" && next === "/") {
+        state = "none";
+        i += 2;
+        continue;
+      }
+      i += 1;
+      continue;
+    }
+    if (state === "single") {
+      if (ch === "\\" && next) {
+        i += 2;
+        continue;
+      }
+      if (ch === "'" && next === "'") {
+        i += 2;
+        continue;
+      }
+      if (ch === "'") state = "none";
+      i += 1;
+      continue;
+    }
+    if (state === "double") {
+      if (ch === "\\" && next) {
+        i += 2;
+        continue;
+      }
+      if (ch === '"' && next === '"') {
+        i += 2;
+        continue;
+      }
+      if (ch === '"') state = "none";
+      i += 1;
+      continue;
+    }
+    if (state === "backtick") {
+      if (ch === "`" && next === "`") {
+        i += 2;
+        continue;
+      }
+      if (ch === "`") state = "none";
+      i += 1;
+      continue;
+    }
+
+    if (ch === "-" && next === "-") {
+      state = "lineComment";
+      i += 2;
+      continue;
+    }
+    if (ch === "#") {
+      state = "lineComment";
+      i += 1;
+      continue;
+    }
+    if (ch === "/" && next === "*") {
+      state = "blockComment";
+      i += 2;
+      continue;
+    }
+    if (ch === "'") {
+      state = "single";
+      i += 1;
+      continue;
+    }
+    if (ch === '"') {
+      state = "double";
+      i += 1;
+      continue;
+    }
+    if (ch === "`") {
+      state = "backtick";
+      i += 1;
+      continue;
+    }
+    if (ch === ";") {
+      tokens.push({ kind: "semicolon", value: ";" });
+      i += 1;
+      continue;
+    }
+
+    const word = /^[A-Za-z_][\w$]*/.exec(sql.slice(i))?.[0];
+    if (word) {
+      tokens.push({ kind: "word", value: word.toUpperCase() });
+      i += word.length;
+      continue;
+    }
+    i += 1;
+  }
+
+  return tokens;
 }
 
 function startsWithOraclePlSqlBlock(sql: string): boolean {
