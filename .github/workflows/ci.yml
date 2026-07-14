@@ -59,12 +59,6 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
-      - name: Free disk space
-        run: |
-          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android /usr/local/.ghcup || true
-          docker system prune -af || true
-          df -h
-
       - name: Install system dependencies
         run: |
           sudo apt-get update
@@ -85,6 +79,8 @@ jobs:
         with:
           workspaces: "./ -> target"
           shared-key: ci-rust-fmt-clippy-x86_64-unknown-linux-gnu
+          # Preserve completed dependency builds when a later lint step fails.
+          cache-on-failure: true
 
       - name: Cargo fmt check
         run: cargo fmt --check
@@ -109,12 +105,6 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
-      - name: Free disk space
-        run: |
-          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android /usr/local/.ghcup || true
-          docker system prune -af || true
-          df -h
-
       - name: Install system dependencies
         run: |
           sudo apt-get update
@@ -133,6 +123,8 @@ jobs:
         with:
           workspaces: "./ -> target"
           shared-key: ci-rust-test-x86_64-unknown-linux-gnu
+          # Preserve completed dependency builds when a later test step fails.
+          cache-on-failure: true
 
       - name: Cargo test
         run: cargo test --workspace --locked
