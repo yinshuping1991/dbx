@@ -28,6 +28,7 @@ import { redisCommandResultToQueryResult } from "@/lib/redis/redisQueryResult";
 import { nextRedisCommandDb } from "@/lib/redis/redisCommandSession";
 import { isRedisMutatingCommand } from "@/lib/redis/redisCommandTable";
 import { usesAgentCursorForQuery } from "@/lib/database/databaseDriverManifest";
+import { supportsClearableQuerySchema } from "@/lib/database/databaseFeatureSupport";
 import { canUseKeylessRowPredicate, DBX_ROWID_COLUMN, editablePrimaryKeys, usesSyntheticRowIdKey } from "@/lib/table/tableEditing";
 import { TABLE_DATA_EXPORT_PAGE_SIZE } from "@/lib/table/tableDataExport";
 import { tableMetaForDataTab } from "@/lib/table/tableDataTabMeta";
@@ -357,6 +358,7 @@ export const useQueryStore = defineStore("query", () => {
   const closeConfirmContext = ref<CloseConfirmContext>("tab");
   const tableStructureRefreshVersions = ref<Record<string, number>>({});
   const savedSqlEditorPositionTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  const pendingTabSessionResets = new Map<string, Promise<void>>();
   let resultCacheTrimScheduled = false;
   let resultCacheTrimRunning = false;
   let resultCacheTrimRequested = false;
@@ -379,7 +381,7 @@ export const useQueryStore = defineStore("query", () => {
   }
   const MAX_CACHED_RESULTS = 5;
 
-  async function closeResultSession(tab: QueryTab | undefined, preserveSessionId?: string) {
+  async function closeResultSession(tab: QueryTab | undefined, preserveSessionId?: string, throwOnError = false) {
     const sessionId = tab?.resultSessionId ?? tab?.result?.session_id;
     if (!tab || !sessionId || sessionId === preserveSessionId) return;
     try {
@@ -389,28 +391,54 @@ export const useQueryStore = defineStore("query", () => {
       await api.closeQuerySession(tab.connectionId, executionDatabase, sessionId, tab.id);
     } catch (error) {
       console.warn("[DBX][query-session:close:error]", { tabId: tab.id, sessionId, error });
+      if (throwOnError) throw error;
     } finally {
       if (tab.resultSessionId === sessionId) tab.resultSessionId = undefined;
       if (tab.result?.session_id === sessionId) tab.result.session_id = undefined;
     }
   }
 
-  async function closeClientSessionId(connectionId: string, database: string, clientSessionId: string, logContext: Record<string, unknown> = {}) {
+  async function closeClientSessionId(connectionId: string, database: string, clientSessionId: string, logContext: Record<string, unknown> = {}, throwOnError = false) {
     try {
       await api.closeClientConnectionSession(connectionId, database, clientSessionId);
     } catch (error) {
       console.warn("[DBX][client-session:close:error]", { ...logContext, clientSessionId, error });
+      if (throwOnError) throw error;
     }
   }
 
-  async function closeClientConnectionSession(tab: QueryTab | undefined) {
+  async function closeClientConnectionSession(tab: QueryTab | undefined, throwOnError = false) {
     if (!tab?.connectionId) return;
     const catalog = tab.mode === "data" ? tab.tableMeta?.catalog : undefined;
     const connection = catalog ? useConnectionStore().getConfig(tab.connectionId) : undefined;
     const executionDatabase = dataTabExecutionDatabase(connection, tab.database, catalog);
     const clientSessionIds = [...new Set([tabClientSessionId(tab), ...BACKGROUND_CLIENT_SESSION_SUFFIXES.map((suffix) => tabClientSessionId(tab, suffix)), tab.explainClientSessionId].filter((sessionId): sessionId is string => !!sessionId))];
     for (const clientSessionId of clientSessionIds) {
-      await closeClientSessionId(tab.connectionId, executionDatabase, clientSessionId, { tabId: tab.id });
+      await closeClientSessionId(tab.connectionId, executionDatabase, clientSessionId, { tabId: tab.id }, throwOnError);
+    }
+  }
+
+  function queueTabSessionReset(tab: QueryTab) {
+    const previousReset = pendingTabSessionResets.get(tab.id);
+    const reset = (async () => {
+      if (previousReset) await previousReset;
+      // A schema reset must fail closed: reusing the old session would retain Oracle CURRENT_SCHEMA.
+      await closeResultSession(tab, undefined, true);
+      await closeClientConnectionSession(tab, true);
+    })();
+    pendingTabSessionResets.set(tab.id, reset);
+    const clearPendingReset = () => {
+      if (pendingTabSessionResets.get(tab.id) === reset) pendingTabSessionResets.delete(tab.id);
+    };
+    void reset.then(clearPendingReset, clearPendingReset);
+  }
+
+  async function waitForTabSessionReset(tabId: string) {
+    while (true) {
+      const pendingReset = pendingTabSessionResets.get(tabId);
+      if (!pendingReset) return;
+      await pendingReset;
+      if (pendingTabSessionResets.get(tabId) === pendingReset) pendingTabSessionResets.delete(tabId);
     }
   }
 
@@ -1985,6 +2013,15 @@ export const useQueryStore = defineStore("query", () => {
     const tab = tabs.value.find((t) => t.id === id);
     if (!tab || tab.schema === schema) return;
     rollbackTabTransaction(tab);
+    const clearsQuerySchema = tab.mode === "query" && tab.schema && !schema && supportsClearableQuerySchema(useConnectionStore().getConfig(tab.connectionId)?.db_type);
+    if (clearsQuerySchema) {
+      queueTabSessionReset(tab);
+      clearResultPayload(tab);
+      tab.lastExecutedSql = undefined;
+      tab.resultBaseSql = undefined;
+      tab.resultSortedSql = undefined;
+      clearExplain(tab);
+    }
     tab.schema = schema;
     if (tab.mode === "objects") tab.objectBrowser = { ...tab.objectBrowser, schema, viewport: undefined };
   }
@@ -2605,6 +2642,7 @@ export const useQueryStore = defineStore("query", () => {
     let countSql: string | undefined;
     let useAgentResultSession = false;
     try {
+      await waitForTabSessionReset(id);
       const connStore = useConnectionStore();
       let conn = connStore.getConfig(tab.connectionId);
       const parsedMongoCommands = conn?.db_type === "mongodb" ? splitMongoCommandRanges(sql) : undefined;
@@ -3208,6 +3246,16 @@ export const useQueryStore = defineStore("query", () => {
     tab.explainSql = undefined;
     tab.explainTableSql = undefined;
     tab.lastExplainedSql = sql;
+
+    try {
+      await waitForTabSessionReset(id);
+    } catch (e: any) {
+      // Do not start an explain with a session whose schema reset did not complete.
+      tab.isExplaining = false;
+      tab.explainExecutionId = undefined;
+      tab.explainError = String(e?.message || e);
+      return { ok: false as const, reason: tab.explainError };
+    }
 
     // DM and Oracle agents expose native text plans. DM also supports autotrace.
     if (databaseType === "dameng" || databaseType === "oracle") {
