@@ -1406,7 +1406,7 @@ export interface UpdateInfo {
   release_notes: string;
 }
 
-export type UpdateDownloadSource = "official" | "cnb" | "atomgit";
+export type UpdateDownloadSource = "official" | "cnb";
 
 export interface UpdateDownloadProgress {
   downloaded: number;
